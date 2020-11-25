@@ -27,6 +27,11 @@ friend_requests = db.Table('friend_requests',
     db.Column('friended_id', db.Integer, db.ForeignKey('users.id'), nullable=False),
 )
 
+selected_games = db.Table('selected_games',
+    db.Column('user_id', db.String, db.ForeignKey('users.id'), nullable=False),
+    db.Column('game_name', db.String, db.ForeignKey('games.name'), nullable=False),
+)
+
 taggings = db.Table('taggings',
     db.Column('user_id', db.Integer, db.ForeignKey('users.id'), nullable=False),
     db.Column('tag_name', db.String, db.ForeignKey('tags.name'), nullable=False),
@@ -55,9 +60,6 @@ class User(db.Model):
     verified = db.Column(db.Boolean, nullable=False, default=False)
     admin = db.Column(db.Boolean, nullable=False, default=False)
     game = db.Column(db.String(64), nullable=False)
-
-    score = db.Column(db.Float, default=25.0, server_default="25.0")
-    sigma = db.Column(db.Float, default=8.333, server_default="8.333")
 
     # Riot Games integration
     # maybe make nullable=False?
@@ -115,16 +117,6 @@ class User(db.Model):
         self.confirmed = confirmed
         self.age = age
         self.registered_on = datetime.datetime.utcnow()
-
-    @property
-    def sweaty(self):
-        minmax = db.engine.execute("SELECT MIN(score), MAX(score) FROM User")
-
-        low, high = minmax.fetchone()
-        if low == high:
-            return 10
-
-        return (self.score - low) / (high - low) * 10
 
     def generate_token(self):
         """
@@ -366,6 +358,20 @@ class Location(db.Model):
 
     def people(self):
         return User.query.filter(User.current_location_id == self.id).count()
+
+
+class Game(db.Model):
+    __tablename__ = 'games'
+
+    name =db.Column(db.String(64), primary_key=True)
+
+    users = db.relationship(
+        'User', secondary=selected_games,
+         backref=db.backref('games', lazy='dynamic'), lazy='dynamic'
+    )
+
+    def __init__(self, name):
+        self.name = name
 
 
 class Tag(db.Model):
