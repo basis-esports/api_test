@@ -54,7 +54,7 @@ class User(db.Model):
     confirmed = db.Column(db.Boolean, default=False)
     verified = db.Column(db.Boolean, nullable=False, default=False)
     admin = db.Column(db.Boolean, nullable=False, default=False)
-    position = db.Column(db.String(64), nullable=False)
+    game = db.Column(db.String(64), nullable=False)
 
     score = db.Column(db.Float, default=25.0, server_default="25.0")
     sigma = db.Column(db.Float, default=8.333, server_default="8.333")
@@ -73,7 +73,6 @@ class User(db.Model):
     current_location_id = db.Column(db.Integer, db.ForeignKey('locations.id'))
 
     # Relationships
-    city_id = db.Column(db.Integer, db.ForeignKey('cities.id'))
     location = db.relationship(
         'User', secondary=lcoations,
         primaryjoin=(locations.c.location_id == id),
@@ -106,12 +105,12 @@ class User(db.Model):
     lng = db.Column(db.Float)
     address = db.Column(db.String(256), nullable=True)
 
-    def __init__(self, name, email, gender, password, city_id, position, confirmed=False, age=None):
+    def __init__(self, name, email, gender, password, game, confirmed=False, age=None):
         self.name = name
         self.email = email
         self.gender = gender
         self.set_password(password)
-        self.position = position # <- new addition
+        self.game = game # <- new addition
         self.city_id = city_id
         self.confirmed = confirmed
         self.age = age
@@ -170,12 +169,11 @@ class User(db.Model):
             password, app.config.get('BCRYPT_LOG_ROUNDS')
         ).decode()
 
-    # add User.position
     def search(self, query: str):
-        users = User.query.filter(User.city_id == self.city_id,
-                                  User.id != self.id,
+        users = User.query.filter(User.id != self.id,
                                   User.name.ilike('%' + query + '%'),
-                                  User.confirmed == True)
+                                  User.confirmed == True,
+                                  User.game == self.game)
         return users.limit(10).all()
 
     def follow(self, user):
@@ -351,7 +349,6 @@ class Location(db.Model):
     address = db.Column(db.String(256), nullable=True)
 
     # Relationships
-    city_id = db.Column(db.Integer, db.ForeignKey('cities.id'))
     updates = db.relationship('Update', backref='location', lazy=True)
 
     def update(self, raw):
@@ -409,72 +406,3 @@ class Update(db.Model):
         if include_location:
             raw['location'] = self.location.json(me)
         return raw
-
-
-class City(db.Model):
-    __tablename__ = 'cities'
-
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-
-    name = db.Column(db.String(64), unique=True)
-
-    # Relationships
-    local_players = db.relationship('User', backref='users', lazy='dynamic')
-    locations = db.relationship('Location', backref='locations', lazy='dynamic')
-
-    # Location
-    location = db.Column(db.String(100), nullable=False)
-    lat = db.Column(db.Float)
-    lng = db.Column(db.Float)
-    address = db.Column(db.String(256), nullable=True)
-
-
-class Comparison(db.Model):
-    __tablename__ = 'Comparisons'
-
-    id = db.Column(db.Integer, primary_key=True)
-
-    evaluator_id = db.Column(db.BigInteger,db.ForeignKey(User.id, on_delete=models.PROTECT), nullable=False)
-    evaluator = db.relationship(
-        User, primaryjoin=evaluator_id == User.id,
-        backref=orm.backref('comparison', lazy='dynamic')
-    )
-
-    male_id = db.Column(db.BigInteger, db.ForeignKey(User.id, on_delete=models.PROTECT), nullable=False)
-    male = db.relationship(User, primaryjoin=male_id == User.id)
-
-    female_id = db.Column(db.BigInteger, db.ForeignKey(User.id, on_delete=models.PROTECT), nullable=False)
-    female = db.relationship(User, primaryjoin=female_id == User.id)
-
-    position_id = db.Column(db.BigInteger, db.ForeignKey(User.id, on_delete=models.PROTECT), nullable=False)
-    position = db.relationship(User, primaryjoin=position_id == User.id)
-
-    outcome = db.Column(
-        db.Enum("open","equal","male","female"),
-        default="open", server_default="open",
-    )
-
-    __table_args__ = (
-        Index("udx_single_comparisons", evaluator_id, male_id, female_id, position_id, unique=True),
-    )
-
-
-class UserSchema(Schema):
-    class Meta:
-        model = User
-        fields = ('id', 'name', 'age', 'gender', 'position', 'score', 'sigma', 'sweat')
-        sqla_session = db.session
-
-
-class ComparisonSchema(Schema):
-    evaluator = fields.Nested(UserSchema)
-    male = fields.Nested(UserSchema)
-    female = fields.Nested(UserSchema)
-    position = fields.Nested(UserSchema)
-
-    class Meta:
-        model = Comparison
-        fields = ("id", "evaluator", "male", "female", "position", "outcome")
-        sqla_session = db.session
-
-
