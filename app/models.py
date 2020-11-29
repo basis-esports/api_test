@@ -47,6 +47,7 @@ class User(db.Model):
     __tablename__ = 'users'
 
     id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+
     registered_on = db.Column(db.DateTime, nullable=False)
     last_seen = db.Column(db.DateTime, nullable=True)
 
@@ -59,7 +60,7 @@ class User(db.Model):
     confirmed = db.Column(db.Boolean, default=False)
     verified = db.Column(db.Boolean, nullable=False, default=False)
     admin = db.Column(db.Boolean, nullable=False, default=False)
-    game = db.Column(db.String(64), nullable=False)
+    profile_picture = db.Column(db.String(250), nullable=False)
 
     # Riot Games integration
     # maybe make nullable=False?
@@ -71,12 +72,15 @@ class User(db.Model):
     facebook_name = db.Column(db.String(50), nullable=True)
 
     # Things related to location
-    # Change to current_location_id
+    location = db.Column(db.String(100), nullable=False)
+    lat = db.Column(db.Float)
+    lng = db.Column(db.Float)
+    address = db.Column(db.String(256), nullable=True)
     current_location_id = db.Column(db.Integer, db.ForeignKey('locations.id'))
 
     # Relationships
     location = db.relationship(
-        'User', secondary=lcoations,
+        'User', secondary=locations,
         primaryjoin=(locations.c.location_id == id),
         backref=db.backref('locations', lazy='dynamic'), lazy='dynamic')
     followed = db.relationship(
@@ -101,18 +105,12 @@ class User(db.Model):
         backref=db.backref('blocked_by', lazy='dynamic'), lazy='dynamic')
     updates = db.relationship('Update', backref='user', lazy=True)
 
-    # Location
-    location = db.Column(db.String(100), nullable=False)
-    lat = db.Column(db.Float)
-    lng = db.Column(db.Float)
-    address = db.Column(db.String(256), nullable=True)
-
-    def __init__(self, name, email, gender, password, game, confirmed=False, age=None):
+    def __init__(self, name, email, gender, password,profile_picture, confirmed=False, age=None):
         self.name = name
         self.email = email
         self.gender = gender
         self.set_password(password)
-        self.game = game # <- new addition
+        self.profile_picture = profile_picture # <- new addition
         self.city_id = city_id
         self.confirmed = confirmed
         self.age = age
@@ -268,7 +266,7 @@ class User(db.Model):
         # TODO: don't build this list with python! There must be a better way to do this with a query...
         friend_ids = [user.id for user in self.friends()]
         users = User.query.filter(User.facebook_id.in_(facebook_ids) & User.id.notin_(friend_ids))
-        return users.all()
+        return users.all()   
 
     def json(self, me, need_friendship=True, is_friend=None, has_sent_friend_request=None, has_received_friend_request=None):
         """
@@ -352,18 +350,21 @@ class Location(db.Model):
             if field in raw:
                 setattr(self, field, raw[field])
 
-    def __init__(self, raw, city_id):
+    def __init__(self, raw):
         self.update(raw)
-        self.city_id = city_id
 
     def people(self):
         return User.query.filter(User.current_location_id == self.id).count()
+
+    def friends_at_location(self, location_id):
+        return self.friended.filter(User.current_location_id == location_id).all() \
+        + self.frienders.filter(User.current_location_id == location_id).all()
 
 
 class Game(db.Model):
     __tablename__ = 'games'
 
-    name =db.Column(db.String(64), primary_key=True)
+    name = db.Column(db.String(64), primary_key=True)
 
     users = db.relationship(
         'User', secondary=selected_games,
