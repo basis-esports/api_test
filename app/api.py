@@ -213,6 +213,36 @@ def unblock_user(user_id):
     else:
         return fail('You haven\'t blocked this person.')
 
+# Games
+@api.route('/users/me/games/<game_name>', methods=['POST'])
+def add_game(user_id, game_name):
+    user = User.query.get_or_404(user_id)
+    if not (g.me.admin):
+        abort(403)
+    if user.has_game(game_name):
+        return fail('User already plays this game.')
+    if user.add_game(game_name):
+        db.session.commit()
+        return succ('Added game!')
+    return fail('Game not added.')
+
+@api.route('/users/me/games/<game_name>', methods=['DELETE'])
+def remove_game(user_id, game_name):
+    user = User.query.get_or_404(user_id)
+    if not (g.me.admin):
+        abort(403)
+    if not user.has_game(game_name):
+        return fail('User does not play this game.')
+    if user.remove_game(game_name):
+        db.session.commit()
+        return succ('Game removed!')
+    return fail('Game not removed.')
+
+@api.route('/games/search/<query>')
+def search_games(query):
+    query = query.lower()
+    games = Game.query.filter(User.name.ilike('%' + query + '%'))
+    return jsonify([game.name for game in games])
 
 # Facebook
 @api.route('/users/me/facebook', methods=['POST'])
@@ -368,187 +398,11 @@ def get_user_current_location(user_id):
     return jsonify([location.json(g.me)])
 
 
-############
-# Matching #
-############
-
-user_schema = UserSchema()
+#############
+#    TBD    #
+#############
 
 
-@api.route("/api/users/me")
-def get_current_user():
-    user = None
-    if "userid" in session:
-        user = User.query.get(session['userid'])
-
-    return jsonify(user_schema.dump(user).data)
-
-
-@api.route('/api/users/<id>')
-def user_detail(id):
-    user = User.query.get(id)
-    if user is None:
-        abort(404)
-
-    res = user_schema.dump(user).data
-    return jsonify(res)
-
-
-@api.route("/api/users/<id>/matches")
-def get_user_matches(id):
-    user = User.query.get(id)
-    if user is None:
-        abort(404)
-
-    subqry = select([User.id]).where(
-        User.position != user.position
-    ).order_by(
-        func.abs(User.score - user.score)
-    ).limit(5).alias()
-    best_matches = User.query.join(subqry, subqry.c.id == User.id).all()
-
-    res = user_schema.dump(best_matches, many=True).data
-    return jsonify(results=res)
-
-
-@api.route('/api/users', methods=['GET', 'POST', 'PUT'])
-def users():
-    if request.method == 'GET':
-        res = user_schema.dump(User.query.all(), many=True).data
-        return jsonify(results=res)
-
-    elif request.method == 'POST':
-        user = User(**user_schema.load(request.json).data)
-        db.session.add(user)
-        try:
-            db.session.commit()
-        except exc.IntegrityError:
-            db.session.rollback()
-            user = User.query.get(request.json['id'])
-
-        session['userid'] = user.id
-        return jsonify(user_schema.dump(user).data)
-
-    elif request.method == 'PUT':
-        parameters = user_schema.load(request.json).data
-        user = User.query.get(parameters['id'])
-        for k, v in parameters.iteritems():
-            setattr(user, k, v)
-        db.session.commit()
-        return jsonify(user_schema.dump(user).data)
-
-comparison_schema = ComparisonSchema()
-
-
-@api.route('/api/comparisons')
-def comparisons():
-    NUM_NEW_COMPS = 10
-
-    evaluator_id = session.get('userid') or request.args.get('userid')
-    evaluator_comparisons_qry = Comparison.query.filter_by(evaluator_id=evaluator_id)
-
-    comparisons = []
-    if evaluator_id is not None:
-        open_comparisons = evaluator_comparisons_qry.filter_by(outcome="open").all()
-        if len(open_comparisons) < NUM_NEW_COMPS:
-            # Get all existing comparisons
-            existing_comparisons = set(
-                (c.male_id, c.female_id, c.position_id) for c in evaluator_comparisons_qry
-            )
-
-            # Get all users the evaluator has not yet compared
-            all_males = []
-            all_females = []
-            all_positions = []
-            all_users = db.session.query(User.id, User.gender, User.position).filter(
-                User.id != evaluator_id
-            ).all()
-            for userid, gender in all_users:
-                target = all_males if gender == "male" else all_females
-                target.append(userid)
-
-            random.shuffle(all_males)
-            random.shuffle(all_females)
-
-            max_tries = (
-                (len(all_males) - 1) * (len(all_females) - 1)
-                - len(existing_comparisons)
-            )
-            tries = 0
-            while (len(open_comparisons) < NUM_NEW_COMPS and tries < max_tries):
-                tries += 1
-
-                male, female = all_males.pop(0), all_females.pop(0), all_positions.pop(0)
-                if (male, female, position) in existing_comparisons:
-                    all_males.append(male)
-                    all_females.append(female)
-                    all_positions.append(position)
-                    continue
-
-                new_open_comparison = Comparison(
-                    evaluator_id=evaluator_id, male_id=male, female_id=female, position_id=position
-                )
-                db.session.add(new_open_comparison)
-                db.session.flush()
-                open_comparisons.append(new_open_comparison)
-
-        db.session.commit()
-        comparisons = comparison_schema.dump(open_comparisons, many=True).data
-
-    return jsonify(results=comparisons)
-
-
-@api.route('/api/comparisons/<int:comparison_id>', methods=['PUT'])
-def update_comparison(comparison_id):
-    comparison = Comparison.query.get(comparison_id)
-    if comparison is None:
-        abort(404)
-
-    outcome = request.json.get('outcome')
-    if outcome in (None, "open"):
-        abort(404)
-
-    comparison.outcome = outcome
-
-    winner, loser = comparison.male, comparison.female, comparison.position
-    if outcome == "female":
-        winner, loser = loser, winner
-
-    winner_rat = Rating(mu=winner.score, sigma=winner.sigma)
-    loser_rat = Rating(mu=loser.score, sigma=loser.sigma)
-    new_winner_rat, new_loser_rat = rate_1vs1(
-        winner_rat, loser_rat, drawn=True if outcome == "equal" else False
-    )
-
-    winner.score = new_winner_rat.mu
-    winner.sigma = new_winner_rat.sigma
-
-    loser.score = new_loser_rat.mu
-    loser.sigma = new_loser_rat.sigma
-
-    db.session.commit()
-    return jsonify(comparison_schema.dump(comparison).data)
-
-
-@api.route('/api/teams')
-def top_teams():
-    results = []
-
-    couples = db.engine.execute(
-        "SELECT male_id, female_id, position_id, COUNT(*) AS no_of_equals"
-        "   FROM Comparisons WHERE outcome ='equal'"
-        "   GROUP BY male_id, female_id, position_id"
-        "   ORDER BY COUNT(*) DESC LIMIT 10"
-    )
-    for r in teams.fetchall():
-        results.append({
-            'male': user_schema.dump(User.query.get(r.male._id)).data,
-            'female': user_schema.dump(User.query.get(r.female_id)).data,
-            'position': user_schema.dump(User.query.get(r.position_id)).data,
-            'number_of_equals': r.no_of_equals,
-        })
-
-    return jsonify(results=results)
 
 
 @api.route("/leDatabase", methods=["DELETE"])
