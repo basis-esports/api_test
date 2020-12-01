@@ -11,6 +11,9 @@ import datetime
 import jwt
 import random
 
+UPCOMING_RANGE = datetime.timedelta(days=5)
+EVENT_LENGTH = datetime.timedelta(hours=10)
+AFTER_END_VISIBILITY = datetime.timedelta(hours=20)
 
 followers = db.Table('followers',
     db.Column('follower_id', db.Integer, db.ForeignKey('users.id'), nullable=False),
