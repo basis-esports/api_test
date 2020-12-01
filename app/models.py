@@ -660,7 +660,7 @@ class Tag(db.Model):
 
     def __init__(self, name):
         self.name = name
-
+        
 
 class Update(db.Model):
     __tablename__ = 'updates'
@@ -671,25 +671,22 @@ class Update(db.Model):
 
     # Relationships
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    location_id = db.Column(db.Integer, db.ForeignKey('locations.id'), nullable=False)
     event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
 
-    def __init__(self, user, location):
+    def __init__(self, user, event):
         self.user_id = user.id
-        self.location_id = location.id
         self.event_id = event_id
 
-    def json(self, me, include_location=False):
+    def json(self, me, include_event=False):
         raw = {
             'id': self.id,
             'body': self.body,
         }
         raw['user'] = self.user.json(me)
-        if include_location:
-            raw['location'] = self.location.json(me)
         if include_event:
             raw['event'] = self.event.json(me)
         return raw
+    
 
 class Review(db.Model):
     __tablename__ = 'reviews'
