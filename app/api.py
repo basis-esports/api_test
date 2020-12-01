@@ -6,7 +6,7 @@ from trueskill import Rating, rate_1vs1
 from werkzeug.utils import secure_filename
 
 from app import db
-from app.models import User, Location, Tag, Update, friendships, friend_requests, Comparison, UserSchema, ComparisonSchema
+from app.models import User, Event, Team, Game, Tag, Update, friendships, friend_requests, Comparison, UserSchema, ComparisonSchema
 from app.geography import searching
 from app.util import succ, fail
 from app.notifier import notifier
@@ -80,15 +80,15 @@ def update_location():
     lng = g.json['lng']
     # In order to save some processing, first check if the user is still at their current location
     # (which they probably will be a decent percentage of the time).
-    if g.me.current_location_id is not None:
-        location = Location.query.get(g.me.current_location_id)
-        if searching(lat, lng, location.lat, location.lng):
-            return succ('Location received, no location change.')
+    if g.me.current_event_id is not None:
+        event = Event.query.get(g.me.current_event_id)
+        if searching(lat, lng, event.lat, event.lng):
+            return succ('Location received, no event change.')
 
-    g.me.current_location_id = None
-    for location in g.me.feed():
-        if (location.lat is not None and location.lng is not None) and searching(lat, lng, location.lat, location.lng):
-            g.me.current_location_id = location.id
+    g.me.current_event_id = None
+    for event in g.me.feed():
+        if (event.lat is not None and event.lng is not None) and searching(lat, lng, event.lat, event.lng):
+            g.me.current_event_id = event.id
             break
     db.session.commit()
     return succ('Location received!')
@@ -98,7 +98,7 @@ def update_location():
 def about():
     return jsonify({
         'users': User.query.count(),
-        'locations': Location.query.count(),
+        'events': Event.query.count(),
     })
 
 
@@ -348,72 +348,534 @@ def get_facebook_friends():
     return jsonify([user.json(g.me, is_friend=False) for user in users])
 
 
-############
-# Location #
-############
+##########
+# Events #
+##########
 
-@api.route('/locations')
-def get_locations():
-    locations = g.me.feed()
-    return jsonify([location.json(g.me) for location in locations])
-
-
-@api.route('/locations/<location_id>')
-def get_location(location_id):
-    location = Location.query.get_or_404(location_id)
-    return jsonify(location.json(g.me))
+@api.route('/events')
+def get_events():
+    events = g.me.feed()
+    return jsonify([events.json(g.me) for event in events])
 
 
-@api.route('/locations/<location_id>', methods=['PUT'])
-def update_location(location_id):
-    location = Location.query.get_or_404(location_id)
+@api.route('/events/<event_id>')
+def get_event(event_id):
+    event = Event.query.get_or_404(event_id)
+    return jsonify(event.json(g.me))
+
+
+@api.route('/events', methods=['POST'])
+def create_event():
+    event = Event(g.json, school_id=g.me.school_id)
+    event.hosts = [g.me]
+    db.session.add(event)
+    db.session.commit()
+    return jsonify(event.json(g.me))
+
+
+@api.route('/events/<event_id>', methods=['PUT'])
+def update_event(event_id):
+    event = Event.query.get_or_404(event_id)
     if not (g.me.admin):
         abort(403)
-    location.update(g.json)
+    event.update(g.json)
     db.session.commit()
-    return jsonify(location.json(g.me)), 202
+    return jsonify(event.json(g.me)), 202
 
 
-@api.route('/users/me/locations/current')
-def get_my_current_location():
-    if g.me.current_location_id is None:
+@api.route('/events/<event_id>', methods=['DELETE'])
+def delete_event(event_id):
+    event = Event.query.get_or_404(event_id)
+    if not (g.me.admin or event.is_hosted_by(g.me)):
+        abort(403)
+    # FIXME: this fails because we haven't gotten rid of the hostships
+    db.session.delete(event)
+    db.session.commit()
+    return succ('Event deleted successfully.')
+
+
+@api.route('/events/<event_id>/end', methods=['POST'])
+def end_event(event_id):
+    event = Event.query.get_or_404(event_id)
+    if not (g.me.admin or event.is_hosted_by(g.me)):
+        abort(403)
+    event.ended = True
+    db.session.commit()
+    return succ('Event ended successfully.')
+
+
+@api.route('/events/<event_id>/tags/<tag_name>', methods=['POST'])
+def add_tag(event_id, tag_name):
+    event = Event.query.get_or_404(event_id)
+    tag_name = tag_name.lower()
+    if not (g.me.admin or event.is_hosted_by(g.me)):
+        abort(403)
+    # First, check if the event already has this tag.
+    if event.has_tag(tag_name):
+        return fail('Event already has this tag.')
+    if event.add_tag(tag_name):
+        db.session.commit()
+        return succ('Added tag!')
+    # If the tag is blacklisted or there was another problem
+    return fail('Tag not added.')
+
+
+@api.route('/events/<event_id>/tags/<tag_name>', methods=['DELETE'])
+def remove_tag(event_id, tag_name):
+    event = Event.query.get_or_404(event_id)
+    if not (g.me.admin or event.is_hosted_by(g.me)):
+        abort(403)
+    if not event.has_tag(tag_name):
+        return fail('Event does not have this tag.')
+    if event.remove_tag(tag_name):
+        db.session.commit()
+        return succ('Removed tag.')
+    # Should not be reached, but just in case.
+    return fail('Tag not removed.')
+
+
+@api.route('/tags/search/<query>')
+def search_tags(query):
+    query = query.lower()
+    tags = Tag.query.filter(User.name.ilike('%' + query + '%'))
+    return jsonify([tag.name for tag in tags])    
+
+
+@api.route('/events/facebook')
+def facebook_events():
+    events = facebook.get_events(g.me.facebook_id)
+    return jsonify([event for event in events])
+
+
+@api.route('/users/me/events/current')
+def get_my_current_event():
+    if g.me.current_event_id is None:
         return jsonify([])
-    location = Location.query.get(g.me.current_location_id)
-    if location is None:
+    event = Event.query.get(g.me.current_event_id)
+    if event is None:
         return jsonify([])
-    return jsonify([location.json(g.me)])
+    return jsonify([event.json(g.me)])
 
 
-@api.route('/users/<user_id>/locations/current')
-def get_user_current_location(user_id):
+@api.route('/users/<user_id>/events/current')
+def get_user_current_event(user_id):
     # TODO: this is so repetitive stop
     user = User.query.get(user_id)
     if not g.me.is_friends_with(user):
         return fail('You must be friends with this user to view their location.', 403)
-    if g.me.current_location_id is None:
+    if g.me.current_event_id is None:
         return jsonify([])
-    location = Location.query.get(user.current_location_id)
-    if location is None:
+    event = Event.query.get(user.current_event_id)
+    if event is None:
         return jsonify([])
-    return jsonify([location.json(g.me)])
+    return jsonify([event.json(g.me)])
 
 
-#############
-#    TBD    #
-#############
+@api.route('/users/me/events')
+def get_my_events():
+    events = g.me.events_hosted(include_past=True)
+    return jsonify([event.json(g.me) for event in events])
 
 
+@api.route('/users/<user_id>/events')
+def get_user_events(user_id):
+    user = User.query.get_or_404(user_id)
+    events = user.events_hosted(include_past=(g.me == user))
+    return jsonify([event.json(g.me) for event in events])
 
 
-@api.route("/leDatabase", methods=["DELETE"])
-def reset_db():
-    db.drop_all()
-    db.create_all()
-    return "ok!"
+@api.route('/events/<event_id>/friends')
+def get_friends_at_event(event_id):
+    users = g.me.friends_at_event(event_id)
+    return jsonify([user.json(g.me) for user in users])
 
 
-if __name__ == '__main__':
-    db.drop_all()
-    db.create_all()
-    app.run(host="0.0.0.0", debug=True)
+# Reviews
+@api.route('/events/<event_id>/reviews', methods=['GET'])
+def get_reviews(event_id):
+    event = Event.query.get_or_404(event_id)
+    if not (g.me.admin or event.is_hosted_by(g.me)):
+        abort(403)
+    return jsonify([review.json() for review in event.reviews])
 
+
+@api.route('/events/<event_id>/reviews', methods=['POST'])
+def create_review(event_id):
+    # TODO: check that I have access to this event
+    event = Event.query.get(event_id)
+    if g.json['positive'] and g.json['negative']:
+        fail('You can\'t review positively and negatively at the same time.')
+    g.me.review_on(event, g.json['positive'], g.json['negative'], g.json['body'])
+    db.session.commit()
+    return succ('Reviewed successfully.')
+
+
+@api.route('/events/<event_id>/reviews', methods=['DELETE'])
+def delete_review(event_id):
+    # TODO: check that I have access to this event
+    event = Event.query.get_or_404(event_id)
+    g.me.unreview_on(event)
+    db.session.commit()
+    return succ('Successfully unreviewd.')
+
+
+# Invites
+@api.route('/events/<event_id>/invites')
+def get_event_invites(event_id):
+    event = Event.query.get_or_404(event_id)
+    return jsonify([user.json(g.me, event) for user in event.invites])
+
+
+@api.route('/events/<event_id>/invites/<user_id>', methods=['POST'])
+def send_invite(event_id, user_id):
+    event = Event.query.get_or_404(event_id)
+    user = User.query.get_or_404(user_id)
+    # TODO: store who created an invitation, and allow users who aren't hosts to only remove their invitations
+    if event.transitive_invites or event.is_hosted_by(g.me):
+        if event.invite(user):
+            db.session.commit()
+            notifier.send_invite(event, user_from=g.me, user_to=user)
+            return succ('Invited user.')
+        else:
+            return fail('User already invited.')
+    else:
+        abort(403)
+
+
+@api.route('/events/<event_id>/invites/<user_id>', methods=['DELETE'])
+def delete_invite(event_id, user_id):
+    event = Event.query.get_or_404(event_id)
+    user = User.query.get_or_404(user_id)
+    # TODO: allow non-host users when transitive_invites is on to remove their own invitations but nobody elses
+    if event.is_hosted_by(g.me):
+        event.invites.remove(user)
+        db.session.commit()
+        return succ('Cancelled invite.', 200)
+    else:
+        abort(403)
+
+
+# Hosts
+@api.route('/events/<event_id>/hosts')
+def get_event_hosts(event_id):
+    event = Event.query.get_or_404(event_id)
+    return jsonify([user.json(g.me, event) for user in event.hosts])
+
+
+@api.route('/events/<event_id>/hosts/<user_id>', methods=['POST'])
+def add_host(event_id, user_id):
+    event = Event.query.get_or_404(event_id)
+    user = User.query.get_or_404(user_id)
+    if g.me.admin or event.is_hosted_by(g.me):
+        if event.add_host(user):
+            db.session.commit()
+            return succ('Added host.')
+        else:
+            return fail('User is already a host.')
+    else:
+        abort(403)
+
+
+@api.route('/events/<event_id>/hosts/<user_id>', methods=['DELETE'])
+def delete_host(event_id, user_id):
+    event = Event.query.get_or_404(event_id)
+    user = User.query.get_or_404(user_id)
+    if (g.me.admin or event.is_hosted_by(g.me)) and user != g.me:
+        # TODO: Add remove_host function on event
+        event.hosts.remove(user)
+        db.session.commit()
+        return succ('Removed host.', 200)
+    else:
+        abort(403)
+
+
+@api.route('/events/<event_id>/invites/search/<query>')
+def search_users_for_event(event_id, query):
+    """
+    Search users and also return data about their invitation status to a given event.
+    TODO: This feels like a really nasty hack and there's gotta be a better way to do this...
+    """
+    users = g.me.search(query)
+    event = Event.query.get(event_id)
+    return jsonify([user.json(g.me, event) for user in users])
+
+
+# Updates
+@api.route('/events/<event_id>/updates')
+def get_event_updates(event_id):
+    event = Event.query.get_or_404(event_id)
+    # TODO: Check that we have access
+    return jsonify([update.json(g.me) for update in event.updates])
+
+
+@api.route('/events/<event_id>/updates/<update_id>')
+def get_event_update(event_id, update_id):
+    #event = Event.query.get_or_404(event_id)
+    update = Update.query.get_or_404(update_id)
+    # TODO: Check that we have access
+    return jsonify(update.json(g.me))
+
+
+@api.route('/events/<event_id>/updates', methods=['POST'])
+def create_event_update(event_id):
+    event = Event.query.get_or_404(event_id)
+    if event.is_hosted_by(g.me):
+        update = Update(g.me, event)
+        db.session.commit()
+        # TODO: send notification to subscribed users
+        return jsonify(update.json(g.me))
+    else:
+        abort(403)
+
+
+@api.route('/events/<event_id>/updates/<update_id>', methods=['PUT'])
+def update_event_update(event_id, update_id):
+    event = Event.query.get_or_404(event_id)
+    if event.is_hosted_by(g.me):
+        update = Update.query.get_or_404(update_id)
+        update.body = g.json['body']
+        return jsonify(update.json(g.me))
+    return fail('Could not edit update.')
+
+
+@api.route('/events/<event_id>/delete/<update_id>', methods=['DELETE'])
+def delete_update(event_id, update_id):
+    event = Event.query.get_or_404(event_id)
+    update = Update.query.get_or_404(update_id)
+    if event.is_hosted_by(g.me):
+        event.updates.remove(update)
+        db.session.delete(update)
+        db.session.commit()
+        return succ('Deleted update.', 200)
+    else:
+        abort(403)
+
+
+#########
+# Teams #
+#########
+
+@api.route('/teams')
+def get_teams():
+    teams = g.me.feed()
+    return jsonify([team.json(g.me) for team in teams])
+
+
+@api.route('/teams/<team_id>')
+def get_team(team_id):
+    team = Team.query.get_or_404(team_id)
+    return jsonify(team.json(g.me))
+
+
+@api.route('/teams', methods=['POST'])
+def create_team():
+    team = Team(g.json)
+    team.owners = [g.me]
+    db.session.add(team)
+    db.session.commit()
+    return jsonify(team.json(g.me))
+
+
+@api.route('/teams/<team_id>', methods=['PUT'])
+def update_team(team_id):
+    team = Team.query.get_or_404(team_id)
+    if not (g.me.admin or team.is_owned_by(g.me)):
+        abort(403)
+    team.update(g.json)
+    db.session.commit()
+    return jsonify(team.json(g.me)), 202
+
+
+@api.route('/teams/<team_id>', methods=['DELETE'])
+def delete_team(team_id):
+    team = Team.query.getor_404(team_id)
+    if not (g.me.admin or team.is_owned_by(g.me)):
+        abort(403)
+    db.session.delete(team)
+    db.session.commit()
+    return succ('Team deleted successfully.')
+
+
+@api.route('/teams/<team_id>/tags/<tag_name>', methods=['POST'])
+def add_tag(team_id, tag_name):
+    team = Team.query.get_or_404(team_id)
+    tab_name = tag_name.lower()
+    if not (g.me.admin or team.is_owned_by(g.me)):
+        abort(403)
+    if team.has_tag(tag_name):
+        return fail('Team already has this tag.')
+    if team.add_tag(tag_name):
+        db.session.commit()
+        return succ('Added tag!')
+    return fail('Tag not added.')
+
+
+@api.route('/teams/<team_id>/tags/<tag_name>', methods=['DELETE'])
+def remove_tag(team_id, tag_name):
+    team = Team.query.get_or_404(team_id)
+    if not (g.me.admin or team.is_owned_by(g.me)):
+        abort(403)
+    if not team.has_tag(tag_name):
+        return fail('Team does not have this tag.')
+    if team.remove_tag(tag_name):
+        db.session.commit()
+        return succ('Removed tag.')
+    return fail('Tag not removed.')
+
+
+@api.route('/users/me/teams/current')
+def get_my_current_team():
+    if g.me.current_team_id is None:
+        return jsonify([])
+    team = Team.query.get(g.me.current_team_id)
+    if team is None:
+        return jsonify([])
+    return jsonify([team.json(g.me)])
+
+
+@api.route('/users/<user_id>/teams/current')
+def get_user_current_team(user_id):
+    user = User.query.get(user_id)
+    if g.me.current_team_id is None:
+        return jsonify([])
+    team = Team.query.get(user.current_team_id)
+    if team is None:
+        return jsonify([])
+    return jsonify([team.json(g.me)])
+
+@api.route('/users/me/teams')
+def get_my_teams():
+    teams = g.me.teams_owned()
+    return jsonify([team.json(g.me) for team in teams])
+
+
+@api.route('/users/<user_id>/teams')
+def get_user_teams(user_id):
+    user = User.query.get_or_404(user_id)
+    teams = user.teams_owned(g.me == user)
+    return jsonify([team.json(g.me) for team in teams])
+
+
+@api.route('/teams/<team_id>/friends')
+def get_friends_on_team(team_id):
+    users = g.me.get_friends_on_team(team_id)
+    return jsonify([user.json(g.me) for user in users])
+
+
+@api.route('/teams/<team_id>/invites')
+def get_team_invites(team_id):
+    team = Team.query.get_or_404(team_id)
+    return jsonify([user.json(g.me, team) for user in team.invites])
+
+
+@api.route('/teams/<team_id>/invites/<user_id>', methods=['POST'])
+def send_invite(team_id, user_id):
+    team = Team.query.get_or_404(team_id)
+    user = User.query.get_or_404(user_id)
+    if team.is_owned_by(g.me):
+        if team.invite(user):
+            db.session.commit()
+            notifier.send_invite(team, user_from=g.me, user_to=user)
+            return succ('Invite sent.')
+        else:
+            return fail('User already invited.')
+    else:
+        abort(403)
+
+
+@api.route('/teams/<team_id>/invites/<user_id>', methods=['DELETE'])
+def delete_invite(team_id, user_id):
+    team = Team.query.get_or_404(team_id)
+    user = User.query.get_or_404(user_id)
+    if team.is_owned_by(g.me):
+        team.invites.remove(user)
+        db.session.commit()
+        return succ('Cancelled invite.', 200)
+    else:
+        abort(403)
+
+
+@api.route('/teams/<team_id>/owners')
+def get_team_owners(team_id):
+    team = Team.query.get_or_404(team_id)
+    return jsonify([user.json(g.me, team) for user in team.owners])
+
+
+@api.route('/teams/<event_id>/owners/<user_id>', methods=['POST'])
+def add_owner(team_id, user_id):
+    team = Team.query.get_or_404(team_id)
+    user = User.query.get_or_404(user_id)
+    if g.me.admin or team.is_owned_by(g.me):
+        if team.add_owner(user):
+            db.session.commit()
+            return succ('Added owner.')
+        else:
+            return fail('User is already an owner.')
+    else:
+        abort(403)
+
+
+@api.route('/teams/<team_id>/owners/<user_id>', methods=['DELETE'])
+def delete_owner(team_id, user_id):
+    team = Team.query.get_or_404(team_id)
+    user = User.query.get_or_404(user_id)
+    if (g.me.admin or team.is_owned_by(g.me)) and user != g.me:
+        team.owners.remove(user)
+        db.session.commit()
+        return succ('Removed owner.', 200)
+    else:
+        abort(403)
+
+
+@api.route('/teams/<team_id>/invites/search/<query>')
+def search_users_for_team(team_id, query):
+    users = g.me.search(query)
+    team = Team.query.get(team_id)
+    return jsonify([user.json(g.me, team) for user in users])
+
+
+@api.route('/teams/<team_id>/updates')
+def get_team_updates(team_id):
+    team = Team.query.get_or_404(team_id)
+    return jsonify([update.json(g.me) for update in team.updates])
+
+
+@api.route('/teams/<team_id>/updates/<update_id>')
+def get_team_update(team_id, update_id):
+    update = Update.query.get_or_404(update_id)
+    return jsonify(update.json(g.me))
+
+
+@api.route('/teams/<team_id>/updates', methods=['POST'])
+def create_team_update(team_id):
+    team = Team.query.get_or_404(team_id)
+    if team.is_owned_by(g.me):
+        update = Update(g.me, team)
+        db.session.commit()
+        return jsonify(update.json(g.me))
+    else:
+        abort(403)
+
+
+@api.route('/teams/<team_id>/updates/<update_id>', methods=['PUT'])
+def update_team_update(team_id, update_id):
+    team = Team.query.get_or_404(team_id)
+    if team.is_owned_by(g.me):
+        update = Update.query.get_or_404(update_id)
+        update.body = g.json['body']
+        return jsonify(update.json(g.me))
+    return fail('Could not edit update.')
+
+
+@api.route('/teams/<team_id>/delete/<update_id>', methods=['DELETE'])
+def delete_update(team_id, update_id):
+    team = Team.query.get_or_404(team_id)
+    update = Update.query.get_or_404(update_id)
+    if team.is_owned_by(g.me):
+        team.updates.remove(update)
+        db.session.delete(update)
+        db.session.commit()
+        return succ('Deleted update.', 200)
+    else:
+        abort(403)
+        
